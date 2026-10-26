@@ -11,6 +11,12 @@ import copy
 from .utils import http_get, sleep_with_progress
 from .config import LIST_URL_TEMPLATE, INFO_URL_PREFIX, SLEEP_INTERVAL, BASE_URL
 
+try:
+    from ops_abnormal_log import log_abnormal
+except ImportError:
+    def log_abnormal(category, message, exc=None):
+        pass
+
 
 def fetch_article_list(page_number):
     """
@@ -64,6 +70,10 @@ def fetch_article_list(page_number):
             f"类型: {len(types)}, 单位: {len(units)}, 日期: {len(dates)}, "
             f"标题: {len(titles)}, URL: {len(full_urls)}"
         )
+        log_abnormal(
+            "crawl",
+            f"列表页 {page_number} HTML 结构解析失败，字段长度不一致",
+        )
         return []
 
 
@@ -109,7 +119,7 @@ def fetch_articles_batch(start_page, end_page, db_manager):
         articles = fetch_article_list(page)
         if not articles:
             logging.error(f"页面 {page} 抓取失败")
-            success = False
+            log_abnormal("crawl", f"列表页 {page} 抓取失败或返回空列表")
             continue
 
         # 抓取每篇文章的详细内容

@@ -11,10 +11,38 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from sqlalchemy.exc import IntegrityError
+import hashlib
+import json
 import logging
 import pathlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from .config import DB_DIR, DB_URL
+from config import (
+    EMAIL_RETRY_BASE_DELAY_SECONDS,
+    EMAIL_RETRY_MAX_DELAY_SECONDS,
+)
+
+
+def canonical_article_urls_json(article_urls):
+    """排序后的 URL 列表 JSON，用于 outbox 去重。"""
+    urls = sorted(set(u for u in article_urls if u))
+    return json.dumps(urls, ensure_ascii=False, separators=(",", ":"))
+
+
+def article_urls_hash(article_urls_json: str) -> str:
+    return hashlib.sha256(article_urls_json.encode("utf-8")).hexdigest()
+
+
+def compute_outbox_next_retry_at(attempts: int, from_time=None):
+    """attempts 为已失败次数（>=1），返回下次重试时刻。"""
+    if from_time is None:
+        from_time = datetime.now()
+    exp = min(max(attempts, 1), 8)
+    delay = min(
+        EMAIL_RETRY_BASE_DELAY_SECONDS * (2 ** (exp - 1)),
+        EMAIL_RETRY_MAX_DELAY_SECONDS,
+    )
+    return from_time + timedelta(seconds=delay)
 
 # 创建 Base 类
 Base = declarative_base()
@@ -48,10 +76,16 @@ class EmailSubscriberDB(Base):
     __tablename__ = "email_subscribers"
 
     id = Column(Integer, primary_key=True)
-    email = Column(String, unique=True)  # 邮箱地址唯一
+    email = Column(String, unique=True)  # 收件（目的）邮箱，唯一
     all_platforms = Column(Boolean, default=True)  # 是否订阅所有平台
     send_frequency = Column(Integer, default=24)  # 发送频率（小时），默认24小时
-    last_email_sent_time = Column(DateTime, nullable=True)  # 上次发送邮件的时间
+    last_email_sent_time = Column(DateTime, nullable=True)  # 投递窗口关闭时更新
+    push_delivery_started_at = Column(
+        DateTime, nullable=True
+    )  # 当前投递窗口开始；NULL 表示未在投递中
+    smtp_server = Column(String, nullable=True)
+    smtp_email = Column(String, nullable=True)
+    smtp_password = Column(String, nullable=True)
 
     # 与平台的多对多关系
     platforms = relationship(
@@ -60,6 +94,51 @@ class EmailSubscriberDB(Base):
 
     def __repr__(self):
         return f"EmailSubscriber(id={self.id}, email='{self.email}', all_platforms={self.all_platforms}, send_frequency={self.send_frequency}, last_sent={self.last_email_sent_time})"
+
+
+class EmailArticlePending(Base):
+    """待推送文章（爬取入库后入队，按订阅者频率发送，成功后再出队）。"""
+
+    __tablename__ = "email_article_pending"
+
+    id = Column(Integer, primary_key=True)
+    subscriber_id = Column(Integer, ForeignKey("email_subscribers.id"), nullable=False)
+    article_url = Column(String, nullable=False)
+    platform = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    subscriber = relationship("EmailSubscriberDB", backref="pending_articles")
+
+    def __repr__(self):
+        return (
+            f"EmailArticlePending(subscriber_id={self.subscriber_id}, "
+            f"url='{self.article_url}', platform='{self.platform}')"
+        )
+
+
+class EmailPushOutbox(Base):
+    """待发 digest 队列（SMTP/外网失败时持久化，后台重试）。"""
+
+    __tablename__ = "email_push_outbox"
+
+    id = Column(Integer, primary_key=True)
+    subscriber_id = Column(Integer, ForeignKey("email_subscribers.id"), nullable=False)
+    platform = Column(String, nullable=False)
+    article_urls = Column(String, nullable=False)
+    urls_hash = Column(String, nullable=False)
+    status = Column(String, default="pending", nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+    next_retry_at = Column(DateTime, nullable=False)
+    last_error = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    subscriber = relationship("EmailSubscriberDB", backref="push_outbox_items")
+
+    def __repr__(self):
+        return (
+            f"EmailPushOutbox(id={self.id}, subscriber_id={self.subscriber_id}, "
+            f"platform='{self.platform}', attempts={self.attempts})"
+        )
 
 
 class EmailStats(Base):
@@ -124,6 +203,70 @@ class EmailSubscriberManager:
                     logging.info("数据库结构升级：添加了 last_email_sent_time 字段")
                 else:
                     print("数据库结构检查完成：last_email_sent_time 字段已存在")
+
+                for col_name, col_type in (
+                    ("smtp_server", "TEXT"),
+                    ("smtp_email", "TEXT"),
+                    ("smtp_password", "TEXT"),
+                ):
+                    if col_name not in columns:
+                        print(f"数据库升级：添加 {col_name} 字段")
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE email_subscribers ADD COLUMN {col_name} {col_type}"
+                            )
+                        )
+                        conn.commit()
+                        columns.append(col_name)
+
+                if "push_delivery_started_at" not in columns:
+                    print("数据库升级：添加 push_delivery_started_at 字段")
+                    conn.execute(
+                        text(
+                            "ALTER TABLE email_subscribers ADD COLUMN push_delivery_started_at DATETIME"
+                        )
+                    )
+                    conn.commit()
+                    columns.append("push_delivery_started_at")
+
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS email_article_pending (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            subscriber_id INTEGER NOT NULL,
+                            article_url TEXT NOT NULL,
+                            platform TEXT NOT NULL,
+                            created_at DATETIME NOT NULL,
+                            FOREIGN KEY(subscriber_id) REFERENCES email_subscribers(id),
+                            UNIQUE(subscriber_id, article_url)
+                        )
+                        """
+                    )
+                )
+                conn.commit()
+
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS email_push_outbox (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            subscriber_id INTEGER NOT NULL,
+                            platform TEXT NOT NULL,
+                            article_urls TEXT NOT NULL,
+                            urls_hash TEXT NOT NULL,
+                            status TEXT NOT NULL DEFAULT 'pending',
+                            attempts INTEGER NOT NULL DEFAULT 0,
+                            next_retry_at DATETIME NOT NULL,
+                            last_error TEXT,
+                            created_at DATETIME NOT NULL,
+                            FOREIGN KEY(subscriber_id) REFERENCES email_subscribers(id),
+                            UNIQUE(subscriber_id, platform, urls_hash)
+                        )
+                        """
+                    )
+                )
+                conn.commit()
 
         except Exception as e:
             print(f"数据库结构升级失败: {str(e)}")
@@ -248,8 +391,45 @@ class EmailSubscriberManager:
         finally:
             session.close()
 
+    def resolve_platform_id(self, platform_name):
+        """精确或模糊匹配爬虫 source 与订阅平台名称。"""
+        if not platform_name:
+            return None
+
+        name = platform_name.strip()
+        pid = self.get_platform_id_by_name(name)
+        if pid is not None:
+            return pid
+
+        def _norm(s: str) -> str:
+            return (
+                s.replace("（", "(")
+                .replace("）", ")")
+                .replace(" ", "")
+                .strip()
+            )
+
+        target = _norm(name)
+        session = self.get_session()
+        try:
+            for platform in session.query(Platform).all():
+                if _norm(platform.name) == target:
+                    return platform.id
+                if name in platform.name or platform.name in name:
+                    return platform.id
+            return None
+        finally:
+            session.close()
+
     def add_subscriber(
-        self, email, platform_ids=None, all_platforms=True, send_frequency=24
+        self,
+        email,
+        platform_ids=None,
+        all_platforms=True,
+        send_frequency=24,
+        smtp_server=None,
+        smtp_email=None,
+        smtp_password=None,
     ):
         """添加订阅者到数据库"""
         session = self.get_session()
@@ -281,6 +461,12 @@ class EmailSubscriberManager:
                 # 如果已存在，更新订阅平台和频率
                 existing.all_platforms = all_platforms
                 existing.send_frequency = send_frequency
+                if smtp_server:
+                    existing.smtp_server = smtp_server
+                if smtp_email:
+                    existing.smtp_email = smtp_email
+                if smtp_password:
+                    existing.smtp_password = smtp_password
 
                 if all_platforms:
                     # 全平台订阅，清空特定平台
@@ -309,6 +495,9 @@ class EmailSubscriberManager:
                     email=email,
                     all_platforms=all_platforms,
                     send_frequency=send_frequency,
+                    smtp_server=smtp_server,
+                    smtp_email=smtp_email,
+                    smtp_password=smtp_password,
                 )
 
                 if not all_platforms and platform_ids and len(platform_ids) > 0:
@@ -564,6 +753,345 @@ class EmailSubscriberManager:
         except Exception as e:
             session.rollback()
             logging.error(f"批量更新发送时间失败: {str(e)}")
+            return 0
+        finally:
+            session.close()
+
+    def get_subscriber_by_id(self, subscriber_id):
+        session = self.get_session()
+        try:
+            return (
+                session.query(EmailSubscriberDB)
+                .filter(EmailSubscriberDB.id == subscriber_id)
+                .first()
+            )
+        finally:
+            session.close()
+
+    def enqueue_article_pending(self, subscriber_id, article_url, platform):
+        """入队；已存在则返回 False。"""
+        session = self.get_session()
+        try:
+            exists = (
+                session.query(EmailArticlePending)
+                .filter(
+                    EmailArticlePending.subscriber_id == subscriber_id,
+                    EmailArticlePending.article_url == article_url,
+                )
+                .first()
+            )
+            if exists:
+                return False
+            row = EmailArticlePending(
+                subscriber_id=subscriber_id,
+                article_url=article_url,
+                platform=(platform or "").strip(),
+                created_at=datetime.now(),
+            )
+            session.add(row)
+            session.commit()
+            return True
+        except IntegrityError:
+            session.rollback()
+            return False
+        except Exception as e:
+            session.rollback()
+            logging.error("enqueue_article_pending 失败: %s", e)
+            return False
+        finally:
+            session.close()
+
+    def list_pending_for_subscriber(self, subscriber_id):
+        session = self.get_session()
+        try:
+            rows = (
+                session.query(EmailArticlePending)
+                .filter(EmailArticlePending.subscriber_id == subscriber_id)
+                .order_by(EmailArticlePending.created_at.asc())
+                .all()
+            )
+            for row in rows:
+                session.expunge(row)
+            return rows
+        finally:
+            session.close()
+
+    def remove_pending_articles(self, subscriber_id, article_urls):
+        if not article_urls:
+            return 0
+        session = self.get_session()
+        try:
+            n = (
+                session.query(EmailArticlePending)
+                .filter(
+                    EmailArticlePending.subscriber_id == subscriber_id,
+                    EmailArticlePending.article_url.in_(list(article_urls)),
+                )
+                .delete(synchronize_session=False)
+            )
+            session.commit()
+            return n
+        except Exception as e:
+            session.rollback()
+            logging.error("remove_pending_articles 失败: %s", e)
+            return 0
+        finally:
+            session.close()
+
+    def count_pending_articles(self):
+        session = self.get_session()
+        try:
+            return session.query(EmailArticlePending).count()
+        finally:
+            session.close()
+
+    def clear_article_pending(self):
+        session = self.get_session()
+        try:
+            n = session.query(EmailArticlePending).delete(synchronize_session=False)
+            session.commit()
+            return n
+        except Exception as e:
+            session.rollback()
+            logging.error("clear_article_pending 失败: %s", e)
+            return 0
+        finally:
+            session.close()
+
+    def list_subscriber_ids_with_pending(self):
+        session = self.get_session()
+        try:
+            rows = (
+                session.query(EmailArticlePending.subscriber_id)
+                .distinct()
+                .all()
+            )
+            return [r[0] for r in rows]
+        finally:
+            session.close()
+
+    def count_users_in_delivery_window(self):
+        session = self.get_session()
+        try:
+            return (
+                session.query(EmailSubscriberDB)
+                .filter(EmailSubscriberDB.push_delivery_started_at.isnot(None))
+                .count()
+            )
+        finally:
+            session.close()
+
+    def start_delivery_window(self, subscriber_id, started_at=None):
+        if started_at is None:
+            started_at = datetime.now()
+        session = self.get_session()
+        try:
+            sub = (
+                session.query(EmailSubscriberDB)
+                .filter(EmailSubscriberDB.id == subscriber_id)
+                .first()
+            )
+            if not sub:
+                return False
+            sub.push_delivery_started_at = started_at
+            session.commit()
+            return True
+        except Exception as e:
+            session.rollback()
+            logging.error("start_delivery_window 失败: %s", e)
+            return False
+        finally:
+            session.close()
+
+    def close_delivery_window(self, subscriber_id, closed_at=None):
+        """关闭投递窗口并更新 last_email_sent_time。"""
+        if closed_at is None:
+            closed_at = datetime.now()
+        session = self.get_session()
+        try:
+            sub = (
+                session.query(EmailSubscriberDB)
+                .filter(EmailSubscriberDB.id == subscriber_id)
+                .first()
+            )
+            if not sub:
+                return False
+            sub.push_delivery_started_at = None
+            sub.last_email_sent_time = closed_at
+            session.commit()
+            return True
+        except Exception as e:
+            session.rollback()
+            logging.error("close_delivery_window 失败: %s", e)
+            return False
+        finally:
+            session.close()
+
+    def get_subscriber_for_push(self, subscriber_id):
+        session = self.get_session()
+        try:
+            from sqlalchemy.orm import joinedload
+
+            sub = (
+                session.query(EmailSubscriberDB)
+                .options(joinedload(EmailSubscriberDB.platforms))
+                .filter(EmailSubscriberDB.id == subscriber_id)
+                .first()
+            )
+            if sub:
+                session.expunge(sub)
+            return sub
+        finally:
+            session.close()
+
+    def has_outbox_for_urls(self, subscriber_id, platform, article_urls):
+        urls_json = canonical_article_urls_json(article_urls)
+        urls_hash = article_urls_hash(urls_json)
+        session = self.get_session()
+        try:
+            return (
+                session.query(EmailPushOutbox)
+                .filter(
+                    EmailPushOutbox.subscriber_id == subscriber_id,
+                    EmailPushOutbox.platform == platform,
+                    EmailPushOutbox.urls_hash == urls_hash,
+                    EmailPushOutbox.status == "pending",
+                )
+                .first()
+                is not None
+            )
+        finally:
+            session.close()
+
+    def upsert_push_outbox(
+        self, subscriber_id, platform, article_urls, error=None, increment_attempt=True
+    ):
+        urls_json = canonical_article_urls_json(article_urls)
+        urls_hash = article_urls_hash(urls_json)
+        err_text = (error or "SMTP send failed")[:500]
+        session = self.get_session()
+        try:
+            row = (
+                session.query(EmailPushOutbox)
+                .filter(
+                    EmailPushOutbox.subscriber_id == subscriber_id,
+                    EmailPushOutbox.platform == platform,
+                    EmailPushOutbox.urls_hash == urls_hash,
+                )
+                .first()
+            )
+            now = datetime.now()
+            if row:
+                if increment_attempt:
+                    row.attempts = (row.attempts or 0) + 1
+                row.status = "pending"
+                row.last_error = err_text
+                row.next_retry_at = compute_outbox_next_retry_at(row.attempts, now)
+                row.article_urls = urls_json
+            else:
+                attempts = 1 if increment_attempt else 0
+                row = EmailPushOutbox(
+                    subscriber_id=subscriber_id,
+                    platform=platform,
+                    article_urls=urls_json,
+                    urls_hash=urls_hash,
+                    status="pending",
+                    attempts=attempts,
+                    next_retry_at=compute_outbox_next_retry_at(attempts, now),
+                    last_error=err_text,
+                    created_at=now,
+                )
+                session.add(row)
+            session.commit()
+            return True
+        except Exception as e:
+            session.rollback()
+            logging.error("upsert_push_outbox 失败: %s", e)
+            return False
+        finally:
+            session.close()
+
+    def delete_push_outbox(self, subscriber_id, platform, article_urls):
+        urls_json = canonical_article_urls_json(article_urls)
+        urls_hash = article_urls_hash(urls_json)
+        session = self.get_session()
+        try:
+            deleted = (
+                session.query(EmailPushOutbox)
+                .filter(
+                    EmailPushOutbox.subscriber_id == subscriber_id,
+                    EmailPushOutbox.platform == platform,
+                    EmailPushOutbox.urls_hash == urls_hash,
+                )
+                .delete(synchronize_session=False)
+            )
+            session.commit()
+            return deleted
+        except Exception as e:
+            session.rollback()
+            logging.error("delete_push_outbox 失败: %s", e)
+            return 0
+        finally:
+            session.close()
+
+    def list_due_outbox(self, limit=10, now=None):
+        if now is None:
+            now = datetime.now()
+        session = self.get_session()
+        try:
+            rows = (
+                session.query(EmailPushOutbox)
+                .filter(
+                    EmailPushOutbox.status == "pending",
+                    EmailPushOutbox.next_retry_at <= now,
+                )
+                .order_by(EmailPushOutbox.created_at.asc())
+                .limit(limit)
+                .all()
+            )
+            for row in rows:
+                session.expunge(row)
+            return rows
+        finally:
+            session.close()
+
+    def count_pending_outbox(self):
+        session = self.get_session()
+        try:
+            return (
+                session.query(EmailPushOutbox)
+                .filter(EmailPushOutbox.status == "pending")
+                .count()
+            )
+        finally:
+            session.close()
+
+    def delete_outbox_by_id(self, outbox_id):
+        session = self.get_session()
+        try:
+            n = (
+                session.query(EmailPushOutbox)
+                .filter(EmailPushOutbox.id == outbox_id)
+                .delete(synchronize_session=False)
+            )
+            session.commit()
+            return n
+        except Exception as e:
+            session.rollback()
+            logging.error("delete_outbox_by_id 失败: %s", e)
+            return 0
+        finally:
+            session.close()
+
+    def clear_push_outbox(self):
+        session = self.get_session()
+        try:
+            n = session.query(EmailPushOutbox).delete(synchronize_session=False)
+            session.commit()
+            return n
+        except Exception as e:
+            session.rollback()
+            logging.error("clear_push_outbox 失败: %s", e)
             return 0
         finally:
             session.close()

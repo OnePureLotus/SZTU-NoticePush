@@ -13,10 +13,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from config import (
     DATABASE_DIR,
     SUBSCRIBERS_DATABASE_URI as DB_URL,
-    SMTP_SERVER,
-    SMTP_PASSWORD,
-    MY_EMAIL,
     SUBSCRIBER_MASK,
+    SMTP_PORT,
 )
 
 # 保持向后兼容

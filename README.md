@@ -1,351 +1,302 @@
-# 🐭 GoldenMouse - 深圳技术大学公文通
+# SZTU-NoticePush
 
-> 让校园信息触手可及
+深圳技术大学校内公文通知的**爬取、展示与邮件推送**系统。在订阅页配置个人 SMTP 与推送频率后，可按部门聚合接收 HTML digest。
 
-一个集成了网页爬虫、邮件订阅和数据展示的深圳技术大学公文通知系统。
+**仓库地址：** <https://github.com/OnePureLotus/SZTU-NoticePush>
 
-## ✨ 功能特色
-
-- 🕷️ **智能爬虫**: 自动爬取深圳技术大学官方公文通知
-- 📧 **个性化邮件订阅**: 支持按平台和频率的个性化推送
-- 📱 **响应式Web界面**: 今日通知、历史归档、订阅管理
-- ⏰ **定时任务**: 自动定时爬取和推送新通知
-- 💾 **数据持久化**: SQLite数据库存储文章和订阅信息
-
-## 🚀 快速开始
-
-### 1. 克隆项目
-
-```bash
-git clone https://github.com/yourusername/GoldenMouse.git
-cd GoldenMouse
-```
-
-### 2. 环境配置
-
-推荐使用 [uv](https://github.com/astral-sh/uv) 作为包管理器：
-
-```bash
-# 安装 uv (如果尚未安装)
-pip install uv
-
-# 安装项目依赖
-uv sync
-```
-
-或者使用传统的pip方式：
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. 配置邮件服务
-
-编辑 `config.py` 文件，配置您的SMTP邮件服务。将以下配置替换为您的实际邮件服务信息：
-
-```python
-# ========== 邮件配置 ==========
-SMTP_SERVER = "smtp.your-email-provider.com"  # 您的SMTP服务器
-SMTP_PASSWORD = "your_app_password"            # 您的邮箱应用密码
-MY_EMAIL = "your-email@example.com"            # 发送邮件的邮箱地址
-
-# 订阅者邮箱格式限制（可根据需要修改）
-SUBSCRIBER_MASK = r"^\d+@stumail\.sztu\.edu\.cn$"  # 深圳技术大学学生邮箱格式
-```
-
-**常见邮件服务商配置示例：**
-
-- **QQ邮箱**: 
-  - SMTP服务器: `smtp.qq.com`
-  - 端口: 587 (TLS) 或 465 (SSL)
-  - 需要开启SMTP服务并获取授权码
-
-- **163邮箱**:
-  - SMTP服务器: `smtp.163.com` 
-  - 端口: 587 或 25
-  - 需要开启SMTP服务并获取授权码
-
-- **Gmail**:
-  - SMTP服务器: `smtp.gmail.com`
-  - 端口: 587
-  - 需要开启两步验证并使用应用专用密码
-
-### 4. 运行服务
-
-```bash
-# 使用 uv 运行 (推荐)
-uv run server.py
-
-# 或者直接使用 Python
-python server.py
-```
-
-服务启动后，访问 http://localhost:5000 即可使用。
-
-## 📖 使用说明
-
-### Web界面
-
-- **首页** (`/`): 查看今日最新公文通知
-- **归档页** (`/archive`): 浏览历史公文，支持分页
-- **订阅管理** (`/subscribe`): 管理邮件订阅设置
-
-### 邮件订阅功能
-
-1. **订阅设置**:
-   - 支持全部平台或选择特定平台订阅
-   - 可设置1-24小时的个性化推送频率
-   - 实时推送新公文通知
-
-2. **邮件格式**:
-   - 精美的HTML邮件模板
-   - 按平台分组显示新通知
-   - 包含标题、来源、时间和链接
-
-### API接口
-
-```bash
-# 获取文章数据
-GET /api/get_data?page=1&per_page=10
-
-# 获取今日文章
-GET /api/get_today_data
-
-# 邮件订阅
-POST /api/subscribe
-
-# 取消订阅  
-POST /api/unsubscribe
-
-# 获取平台列表
-GET /api/get_platforms
-
-# 获取统计数据
-GET /api/get_stats
-```
-
-## 🔧 项目结构
-
-```
-GoldenMouse/
-├── server.py                    # Flask服务器主文件
-├── config.py                    # 项目配置文件
-├── pyproject.toml               # uv项目配置
-├── requirements.txt             # pip依赖列表
-├── LICENSE                      # MIT许可证
-├── README.md                    # 项目说明文档
-├── static/                      # 静态文件目录
-│   ├── today.html              # 今日通知页面
-│   ├── index.html              # 归档页面
-│   └── subscribe.html          # 订阅管理页面
-├── database/                    # 数据库文件目录
-│   ├── articles.sqlite3        # 文章数据库
-│   └── subscribers.sqlite3     # 订阅者数据库
-├── official_document_crawler/   # 爬虫模块
-│   ├── __init__.py
-│   ├── main_crawler.py         # 主爬虫程序
-│   └── crawler/                # 爬虫核心模块
-│       ├── __init__.py
-│       ├── config.py           # 爬虫配置
-│       ├── database.py         # 数据库操作
-│       ├── fetcher.py          # 数据抓取
-│       ├── parser.py           # 内容解析
-│       ├── stats.py            # 统计功能
-│       └── utils.py            # 工具函数
-└── email_subscriber/            # 邮件订阅模块
-    ├── subscriber_manager.py   # 订阅管理服务
-    ├── subscriberDB.py         # 订阅数据库
-    └── config.py               # 邮件配置
-```
-
-## ⚙️ 配置说明
-
-### 数据库配置
-
-系统使用SQLite数据库，配置在 `config.py` 中：
-
-```python
-# 文章数据库
-ARTICLES_DATABASE_URI = f"sqlite:///{str(DATABASE_DIR)}/articles.sqlite3"
-
-# 订阅者数据库  
-SUBSCRIBERS_DATABASE_URI = f"sqlite:///{str(DATABASE_DIR)}/subscribers.sqlite3"
-```
-
-### 爬虫配置
-
-可在 `config.py` 中调整爬虫参数：
-
-```python
-# 请求重试次数
-MAX_RETRIES = 4
-
-# 请求超时时间（秒）
-REQUEST_TIMEOUT = 5
-
-# 休眠时间配置（秒）
-SLEEP_INTERVAL = {
-    "default": 0.5,
-    "every_10": 1,
-    "every_30": 2,
-    "every_50": 2, 
-    "every_200": 5,
-}
-```
-
-### 订阅限制
-
-默认只允许深圳技术大学学生邮箱订阅：
-
-```python
-# 订阅者邮箱格式限制
-SUBSCRIBER_MASK = r"^\d+@stumail\.sztu\.edu\.cn$"
-```
-
-## 🔄 定时任务
-
-系统内置定时爬取功能：
-
-- **爬取频率**: 每30分钟执行一次
-- **推送逻辑**: 发现新文章时按用户设定频率推送
-- **去重机制**: 避免重复推送相同文章
-
-## 👨‍💻 开发者指南
-
-如果您想将此项目适配到自己的学校，需要进行以下修改：
-
-### 1. 修改爬虫配置
-
-编辑 `config.py` 中的爬虫相关配置：
-
-```python
-# ========== 爬虫配置 ==========
-# 基础URL - 替换为您学校的公文通网址
-BASE_URL = "https://your-school-website.edu.cn"
-
-# 列表页URL模板 - 根据您学校的URL格式调整
-LIST_URL_TEMPLATE = f"{BASE_URL}/list.jsp?totalpage=XXX&PAGENUM={{page}}&urltype=tree.TreeTempUrl&wbtreeid=XXXX"
-
-# 详情页URL前缀
-INFO_URL_PREFIX = f"{BASE_URL}/info/"
-
-# 请求头 - 可能需要根据目标网站调整
-HEADERS = {
-    "Referer": "https://your-school-website.edu.cn/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
-}
-```
-
-### 2. 修改数据解析逻辑
-
-根据您学校网站的HTML结构，修改以下文件：
-
-**a) `official_document_crawler/crawler/fetcher.py`**
-
-调整文章列表解析的正则表达式：
-
-```python
-# 根据您学校网站的HTML结构调整这些正则表达式
-types = re.findall(r'target="_self">(.*?)</a></div>', html_content)
-units = re.findall(r'style="font-size: 14px;">(.*?)</a></div>', html_content)
-dates = re.findall(r'style="width:11%;">(.*?)</div>', html_content)
-titles = re.findall(r'.htm" title="(.*?)"  target="_blank" style="', html_content)
-urls = re.findall(r'"><a href="info/(.*?)" title="', html_content)
-```
-
-**b) `official_document_crawler/crawler/parser.py`**
-
-调整文章详情解析逻辑：
-
-```python
-# 根据您学校网站的HTML结构调整解析逻辑
-def parse_article_details(html_content):
-    # 调整内容提取的CSS选择器
-    content_form = soup.select('form[name="_newscontent_fromname"]')  # 根据实际结构修改
-    
-    # 调整时间提取逻辑
-    time_span = soup.select_one('span:-soup-contains("发布时间")')  # 根据实际结构修改
-    
-    # 调整其他字段的提取逻辑...
-```
-
-### 3. 修改邮箱验证规则
-
-在 `config.py` 中修改邮箱格式限制：
-
-```python
-# 修改为您学校的邮箱格式
-SUBSCRIBER_MASK = r"^[a-zA-Z0-9._%+-]+@your-school\.edu\.cn$"
-```
-
-### 4. 测试和调试
-
-1. **小范围测试**: 先用小页码范围测试爬虫是否正常工作
-2. **检查数据**: 确认抓取的数据格式正确
-3. **邮件测试**: 使用测试邮箱验证邮件发送功能
-
-### 5. 重要提示 ⚠️
-
-**合规性警告**：在使用此系统前，请务必：
-
-1. **确认合规性**: 检查您学校的公文通知是否允许对外传播
-2. **获得授权**: 如有必要，请获得学校相关部门的使用授权
-3. **遵守协议**: 确保遵守学校网站的使用条款和robots.txt规定
-4. **控制访问频率**: 避免对目标网站造成过大负载
-5. **保护隐私**: 确保不传播包含个人隐私信息的内容
-
-**建议**：
-- 在正式使用前联系学校网络中心或相关技术部门
-- 考虑与学校合作，获得官方API支持
-- 设置合理的爬取间隔，避免影响正常服务
-
-## 🐛 故障排除
-
-### 常见问题
-
-1. **邮件发送失败**
-   - 检查SMTP配置是否正确
-   - 确认邮箱服务商SMTP服务已开启
-   - 验证授权码/应用密码是否正确
-
-2. **数据库连接错误**
-   - 确保database目录存在且有写入权限
-   - 检查SQLite文件是否损坏
-
-3. **爬虫无法获取数据**
-   - 检查网络连接
-   - 确认目标网站是否可访问
-   - 查看是否需要更新请求头
-   - 检查网站结构是否发生变化
-
-### 日志调试
-
-服务运行时会在控制台输出详细日志，包括：
-- 🚀 服务启动信息
-- 📊 数据库查询结果  
-- 📧 邮件发送状态
-- ⏰ 定时任务执行情况
-
-## 🤝 贡献
-
-欢迎提交Issue和Pull Request来改进项目！
-
-### 贡献指南
-
-1. Fork 本项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
-## 📄 许可证
-
-本项目基于 [MIT License](LICENSE) 开源。
-
-## 👥 作者
-
-GoldenMouse Team - 让校园信息触手可及 🐭
+> 本项目在 [Golden-Mouse](https://github.com/APLaS-Plus/Golden-Mouse) 基础上重构推送架构并扩展运维能力，详见文末 [鸣谢与 lineage](#鸣谢与-lineage)。
 
 ---
 
-如有问题，请访问项目主页或提交Issue。
+## 适用场景（为什么做这个项目）
+
+深技大 [公文通](https://nbw.sztu.edu.cn/) 等校内资源通常要求处于**校园网**环境；在校外访问往往需要先通过**零信任**等门户认证，不方便随时刷通知。
+
+本项目面向这样一种分工：
+
+| 角色 | 环境 | 做什么 |
+|------|------|--------|
+| **爬取端** | 一台**长期在线、能直连校内网**的机器（宿舍小主机、实验室 PC、校内 VPS 等） | 运行本项目的爬虫与 Web 服务，定时抓取最新公文并入库 |
+| **阅读端** | **校外**（实习、在家、出差等） | 不访问校内站，通过**个人邮箱**接收按部门聚合的 HTML 推送 |
+
+邮件走公网 SMTP（QQ/163 等），相当于把「校内通知」**推送上云**到你的邮箱，在校外也能及时、完整地看到正文与附件链接。
+
+```mermaid
+flowchart LR
+  subgraph intranet [校内网常驻机器]
+    crawler[SZTU-NoticePush 爬虫]
+    queue[待推队列]
+    crawler --> queue
+    worker[推送线程]
+    queue --> worker
+  end
+  nbw[公文通 nbw.sztu.edu.cn]
+  nbw --> crawler
+  worker --> smtp[公网 SMTP]
+  smtp --> mail[校外邮箱]
+  intern[实习 / 校外同学]
+  mail --> intern
+```
+
+**说明：**
+
+- 爬虫进程需要能**稳定访问** `nbw.sztu.edu.cn`（一般即机器在校内网或等效可达环境）。
+- 推送使用订阅页填写的**发件 SMTP + 收件邮箱**，不依赖零信任；若爬取端当时无法连外网 SMTP，失败会进入 **outbox**，外网恢复后自动补发。
+- 请勿将服务暴露到公网供陌生人订阅；适合**个人或小范围同学自用**，并遵守学校与邮件服务商相关规定。
+
+---
+
+## 功能概览
+
+| 模块 | 说明 |
+|------|------|
+| 爬虫 | 定时抓取 [深技大公文通](https://nbw.sztu.edu.cn/) 列表与正文，SQLite 持久化 |
+| Web | 今日通知、历史归档、订阅管理（Flask + 静态页） |
+| 邮件 | 按**部门（平台）**聚合的富 HTML digest，支持内嵌图与附件（体积受限） |
+| 推送 | **生产者-消费者**：爬虫只入队，独立线程按频率投递，不漏不重 |
+| 可靠性 | SMTP 失败写入 outbox 后台重试；异常写入 `logs/abnormal.log` |
+
+---
+
+## 架构说明
+
+### 生产者-消费者推送
+
+```mermaid
+flowchart LR
+  subgraph producer [CrawlerThread]
+    crawl[定时爬取] --> db[(articles.sqlite3)]
+    crawl --> enqueue[email_article_pending]
+  end
+  subgraph consumer [PushWorkerThread]
+    poll[每 PUSH_POLL_SECONDS 轮询] --> window{投递窗口到期?}
+    window -->|是| digest[按部门合并 digest]
+    digest --> smtp[用户自有 SMTP]
+    smtp -->|成功| dequeue[出队]
+    smtp -->|失败| outbox[email_push_outbox]
+  end
+  enqueue --> poll
+  outbox --> retry[Outbox 重试线程]
+```
+
+- **生产者（爬虫线程）**：发现新 URL 入库后，按订阅偏好写入每个用户的 `email_article_pending`（同一用户 + URL 唯一，避免重复入队）。
+- **消费者（推送线程）**：服务启动后常驻，每隔 `PUSH_POLL_SECONDS`（默认 180 秒）检查队列；当用户**订阅频率**（如 3 小时）到期时开启**投递窗口**，在窗口时长内按部门合并发送；部门之间使用 `EMAIL_PUSH_INTERVAL_SECONDS` 间隔，降低 SMTP 限流风险。
+- **窗口结束仍有积压**：关闭窗口并记录异常日志，下一周期继续消费，已发送文章不会再次入队。
+- **Outbox**：外网 / 认证导致 SMTP 失败时持久化，独立线程指数退避重试；补发成功后再出队。
+
+### 数据存储
+
+| 文件 | 内容 |
+|------|------|
+| `database/articles.sqlite3` | 文章正文与元数据 |
+| `database/subscribers.sqlite3` | 订阅者、平台、待推队列、outbox、投递窗口状态 |
+| `logs/abnormal.log` | 仅异常事件（爬取/推送/SMTP 等），便于运维排查 |
+
+---
+
+## 快速开始
+
+### 环境
+
+- Python **3.8+**
+- **爬取端**：能访问校内公文通（见上文 [适用场景](#适用场景为什么做这个项目)）
+- **推送**：发件 / 收件邮箱可连公网 SMTP（如 QQ/163 授权码）
+
+### 安装
+
+```bash
+git clone https://github.com/OnePureLotus/SZTU-NoticePush.git
+cd SZTU-NoticePush
+
+# 推荐 uv
+uv sync
+
+# 或 pip
+python -m venv .venv
+source .venv/bin/activate   # Windows: .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### 启动
+
+**推荐：Web + 自动爬虫 + 推送消费者 + outbox 重试**
+
+```bash
+python server.py --start-crawler
+```
+
+Windows 也可使用：
+
+```powershell
+.\start_with_crawler.ps1
+```
+
+仅 Web（在订阅页手动「启动自动爬虫」）：
+
+```bash
+python server.py
+```
+
+自定义监听：
+
+```bash
+python server.py --start-crawler --host 0.0.0.0 --port 5000
+```
+
+浏览器访问：<http://localhost:5000>
+
+更细的部署步骤见 [DEPLOY.md](DEPLOY.md)。
+
+---
+
+## 使用说明
+
+### 订阅邮件
+
+1. 打开 **邮件订阅** 页，填写**收件邮箱**与**发件 SMTP**（服务器、邮箱、授权码）。
+2. 保存时会验证 SMTP 并发送一封验证邮件；失败则不会写入数据库。
+3. 选择「全部平台」或指定部门，设置 **推送频率（1–24 小时）**。
+4. 在订阅页或启动参数中开启**自动爬虫**后，新公文会进入您的待推队列；到期后按部门收到 digest。
+
+发件密码保存在本机 `subscribers.sqlite3` 明文，**仅适合个人/内网自用**，请勿将数据库提交到公开仓库。
+
+### Web 页面
+
+| 路径 | 说明 |
+|------|------|
+| `/` | 今日通知（首页） |
+| 归档页 | 历史查询 |
+| 订阅页 | SMTP、平台、频率、启动爬虫 |
+
+---
+
+## 配置
+
+主要项在 [`config.py`](config.py)：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `SCHEDULED_CRAWL_HOURS` | `0.5` | 自动爬虫间隔（小时），约 30 分钟 |
+| `PUSH_POLL_SECONDS` | `180` | 推送消费者轮询间隔（秒） |
+| `EMAIL_PUSH_INTERVAL_SECONDS` | `300` | 同一用户多部门邮件之间的发送间隔 |
+| `SUBSCRIBER_MASK` | 常见邮箱正则 | 允许订阅的收件邮箱格式 |
+| `OFFICAL_URL` | `localhost:5000` | 邮件内「官网链接」用的对外地址 |
+| `MAX_EMAIL_ATTACHMENT_MB` | `20` | 单封邮件附件体积上限 |
+
+SMTP 端口默认 **587**（TLS），在 `config.py` 的 `SMTP_PORT` 中修改。
+
+---
+
+## API（节选）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/get_today_data` | 今日文章 |
+| GET | `/api/get_data` | 分页归档 |
+| GET | `/api/get_platforms` | 可订阅部门列表 |
+| POST | `/api/subscribe` | 订阅 / 更新 |
+| POST | `/api/start_crawl` | 启动自动爬虫 |
+| GET | `/api/crawl_status` | 爬虫与推送消费者状态 |
+| GET | `/api/push_outbox_stats` | 待推队列、outbox、投递窗口统计 |
+
+---
+
+## 运维与排错
+
+```bash
+# 队列 / 推送状态
+curl http://localhost:5000/api/push_outbox_stats
+
+# 异常日志（仅错误）
+type logs\abnormal.log          # Windows
+tail -f logs/abnormal.log       # Linux/macOS
+```
+
+**清空数据**（先停止 `server.py`）：
+
+```bash
+python clear_database.py --articles -y              # 仅文章库
+python clear_database.py --reset-push-times -y      # 重置推送时间与投递窗口
+python clear_database.py --clear-push-pending -y    # 清空待推队列
+python clear_database.py --clear-push-outbox -y     # 清空 SMTP 失败队列
+python clear_database.py --all -y                   # 文章 + 订阅者
+```
+
+**升级后补历史入队**（若此前漏推；可能重复，慎用）：
+
+```bash
+python backfill_push_queue.py --since 2025-10-01
+```
+
+**测试邮件**：
+
+```bash
+python send_test_email.py --to you@qq.com --subscriber-email you@qq.com --mode digest --limit 3
+```
+
+---
+
+## 项目结构
+
+```
+SZTU-NoticePush/
+├── server.py                 # Flask 入口、爬虫调度、线程启动
+├── config.py                 # 统一配置
+├── ops_abnormal_log.py       # 异常落盘
+├── email_subscriber/         # 订阅 DB、推送生产者/消费者、SMTP、outbox
+├── email_content/            # HTML digest 构建
+├── official_document_crawler/# 公文通爬虫
+├── static/                   # 前端页面
+├── database/                 # SQLite（运行时生成，已 gitignore）
+└── logs/                     # abnormal.log（运行时生成）
+```
+
+---
+
+## 合规与免责声明
+
+- 请遵守学校与公文发布方关于信息传播的规定；本项目仅供学习与个人便利，**不代表官方**。
+- 请合理设置爬取间隔，避免对校内站点造成压力。
+- 使用自有 SMTP 发送邮件时，须遵守邮件服务商条款与反垃圾邮件规范。
+
+---
+
+## 鸣谢与 lineage
+
+本项目基于 **[Golden-Mouse](https://github.com/APLaS-Plus/Golden-Mouse)** 发展而来，感谢原作者在爬虫、订阅与 Web 展示方面的基础工作。
+
+在源项目之上，SZTU-NoticePush 主要演进包括：
+
+- 推送改为**生产者-消费者**模型（`email_article_pending` + 投递窗口 + 独立 `push_worker` 线程）
+- 修复「爬取频率与推送频率错位导致漏推」类问题
+- 外网 SMTP 失败 **outbox** 持久化与重试
+- 运维向 **`logs/abnormal.log`** 与 `/api/push_outbox_stats` 等接口
+
+若您在此基础上继续改进，欢迎在 README 或 PR 中保留对 [Golden-Mouse](https://github.com/APLaS-Plus/Golden-Mouse) 的引用。
+
+---
+
+## 许可证
+
+[MIT](LICENSE)
+
+---
+
+## 贡献
+
+欢迎 Issue / PR。提交前请确认未包含 `database/`、`.env` 或 SMTP 凭据。
+
+### 从本仓库推送代码（维护者）
+
+```bash
+git remote add origin https://github.com/OnePureLotus/SZTU-NoticePush.git
+git branch -M main
+git push -u origin main
+```
+
+若本地已存在 `origin`，可改用：
+
+```bash
+git remote set-url origin https://github.com/OnePureLotus/SZTU-NoticePush.git
+git push -u origin main
+```

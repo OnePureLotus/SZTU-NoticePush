@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>深技大GoldenMouse - 邮箱订阅</title>
+    <title>SZTU-NoticePush - 邮箱订阅</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css">
     <style>
@@ -81,7 +81,7 @@
     <!-- 顶部导航栏 -->
     <nav class="navbar navbar-expand-lg navbar-dark">
         <div class="container">
-            <a class="navbar-brand" href="/">深技大GoldenMouse</a>
+            <a class="navbar-brand" href="/">SZTU-NoticePush</a>
             <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"
                 aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
                 <span class="navbar-toggler-icon"></span>
@@ -106,27 +106,56 @@
     <div class="container content-container">
         <h1 class="text-center mb-4">邮箱订阅服务</h1>
 
+        <!-- 爬虫控制（先配置订阅，再启动爬取） -->
+        <div class="card mb-4 border-warning">
+            <div class="card-header bg-warning text-dark">
+                🕷️ 爬虫与推送
+            </div>
+            <div class="card-body">
+                <p class="card-text mb-2">
+                    服务启动后<strong>不会自动爬取</strong>。请先完成下方订阅设置，再点击「启动自动爬虫」：
+                    会<strong>立即爬取一轮</strong>，之后<strong>约每 30 分钟</strong>自动重复（可在 <code>config.py</code> 的 <code>SCHEDULED_CRAWL_HOURS</code> 调整）。
+                    爬取日志输出在运行 <code>python server.py</code> 的终端窗口；也可使用
+                    <code>python server.py --start-crawler</code> 在启动服务时自动开始爬虫。
+                </p>
+                <button type="button" class="btn btn-warning" id="btnStartCrawl">启动自动爬虫</button>
+                <span class="ms-3 text-muted" id="crawlStatusText">状态：未启动</span>
+                <div id="crawlResult" class="mt-2"></div>
+            </div>
+        </div>
+
         <!-- 订阅卡片 -->
         <div class="card mb-4">
             <div class="card-header">
                 📬 订阅最新通知
             </div>
             <div class="card-body">
-                <p class="card-text">输入您的邮箱地址，订阅深圳技术大学公文通最新通知。我们会在有新通知时，第一时间发送到您的邮箱。</p>
+                <p class="card-text">输入收件邮箱与发件邮箱（SMTP）设置，订阅深圳技术大学公文通最新通知。有新通知时，将通过<strong>您填写的发件邮箱</strong>发送到<strong>收件邮箱</strong>。</p>
                 <p class="card-text text-muted">
-                    <strong>注意：</strong> 目前仅支持深圳技术大学学生邮箱（<span style="color:#007bff">@stumail.sztu.edu.cn</span>），且邮箱前缀必须为学号（全数字），如 <code>202300123456@stumail.sztu.edu.cn</code> 进行订阅。
-                </p>
-                <p class="card-text text-info">
-                    <strong>如有问题：</strong> 请联系管理员邮箱 <a href="mailto:202300204004@stumail.sztu.edu.cn">202300204004@stumail.sztu.edu.cn</a>
+                    <strong>注意：</strong> 支持 QQ、163 等常见邮箱。保存订阅时会登录 SMTP 并向收件邮箱发送一封验证邮件；发件密码仅保存在本机 <code>database/subscribers.sqlite3</code>，请勿将数据库提交到公开仓库。
                 </p>
                 
                 <form id="subscribeForm">
                     <div class="form-group">
-                        <label for="subscribeEmail">邮箱地址</label>
-                        <input type="email" class="form-control" id="subscribeEmail" placeholder="请输入学号邮箱（全数字@stumail.sztu.edu.cn）" required>
+                        <label for="subscribeEmail">收件邮箱（接收通知）</label>
+                        <input type="email" class="form-control" id="subscribeEmail" placeholder="例如：yourname@qq.com" required>
                         <div class="invalid-feedback" id="subscribeEmailInvalid">
-                            请输入有效的学号邮箱（全数字@stumail.sztu.edu.cn）
+                            请输入有效的邮箱地址
                         </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="smtpServer">SMTP 服务器</label>
+                        <input type="text" class="form-control" id="smtpServer" placeholder="例如：smtp.qq.com" required>
+                        <small class="form-text text-muted">QQ 邮箱一般为 smtp.qq.com，163 为 smtp.163.com</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="smtpEmail">发件邮箱（登录 SMTP）</label>
+                        <input type="email" class="form-control" id="smtpEmail" placeholder="与授权码对应的邮箱" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="smtpPassword">发件密码 / 授权码</label>
+                        <input type="password" class="form-control" id="smtpPassword" placeholder="新订阅必填；更新订阅可留空表示不修改" autocomplete="new-password">
                     </div>
                     
                     <div class="form-group">
@@ -311,6 +340,14 @@
                             $('#sendFrequency').val(data.subscription.send_frequency || 24);
                             
                             // 设置订阅类型单选按钮
+                            if (data.subscription.smtp_server) {
+                                $('#smtpServer').val(data.subscription.smtp_server);
+                            }
+                            if (data.subscription.smtp_email) {
+                                $('#smtpEmail').val(data.subscription.smtp_email);
+                            }
+                            $('#smtpPassword').val('');
+
                             if (data.subscription.all_platforms) {
                                 $('#allPlatforms').prop('checked', true).trigger('change');
                             } else {
@@ -331,6 +368,9 @@
             e.preventDefault();
 
             const email = document.getElementById('subscribeEmail').value.trim();
+            const smtpServer = document.getElementById('smtpServer').value.trim();
+            const smtpEmail = document.getElementById('smtpEmail').value.trim();
+            const smtpPassword = document.getElementById('smtpPassword').value;
             const sendFrequency = parseInt(document.getElementById('sendFrequency').value);
             
             // 只做必填校验，不做格式校验，格式交由后端判断
@@ -340,6 +380,11 @@
                 return;
             }
             document.getElementById('subscribeEmail').classList.remove('is-invalid');
+
+            if (!smtpServer || !smtpEmail) {
+                alert('请填写 SMTP 服务器与发件邮箱');
+                return;
+            }
             
             // 验证发送频率
             if (!sendFrequency || sendFrequency < 1 || sendFrequency > 24) {
@@ -386,6 +431,9 @@
                 },
                 body: JSON.stringify({ 
                     email: email,
+                    smtp_server: smtpServer,
+                    smtp_email: smtpEmail,
+                    smtp_password: smtpPassword,
                     all_platforms: allPlatforms,
                     platform_ids: platformIds,
                     send_frequency: sendFrequency
@@ -478,6 +526,95 @@
         function isValidEmail(email) {
             return !!email;
         }
+
+        let crawlPollTimer = null;
+
+        function updateCrawlStatusUI(data) {
+            const statusEl = document.getElementById('crawlStatusText');
+            const btn = document.getElementById('btnStartCrawl');
+            const resultEl = document.getElementById('crawlResult');
+            const intervalMin = Math.round((data.interval_hours || 0.5) * 60);
+
+            if (data.automation_enabled) {
+                btn.disabled = true;
+                btn.textContent = '自动爬虫已启动';
+            } else {
+                btn.disabled = false;
+                btn.textContent = '启动自动爬虫';
+            }
+
+            if (data.running) {
+                statusEl.textContent = '状态：正在爬取…';
+            } else if (data.automation_enabled) {
+                statusEl.textContent = `状态：自动运行中（约每 ${intervalMin} 分钟）`;
+            } else {
+                statusEl.textContent = '状态：未启动';
+            }
+
+            if (data.automation_enabled || data.last_finished_at) {
+                let msg = '';
+                if (data.automation_started_at) {
+                    msg += `自动爬虫开启于 ${data.automation_started_at}。`;
+                }
+                if (data.last_finished_at) {
+                    msg += ` 上轮完成：${data.last_finished_at}，新文章 ${data.last_new_count} 条。`;
+                }
+                if (data.last_error) {
+                    msg += ` 错误：${data.last_error}`;
+                }
+                if (msg) {
+                    resultEl.innerHTML = `<div class="alert alert-info py-2 mb-0">${msg}</div>`;
+                }
+            } else if (!data.running) {
+                resultEl.innerHTML = '';
+            }
+
+            if (data.running) {
+                resultEl.innerHTML =
+                    '<div class="alert alert-secondary py-2 mb-0">正在抓取并解析，详情请看运行服务的终端日志。</div>';
+            }
+        }
+
+        function pollCrawlStatus() {
+            fetch('/api/crawl_status')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) return;
+                    updateCrawlStatusUI(data);
+                    if (data.running || data.automation_enabled) {
+                        crawlPollTimer = setTimeout(pollCrawlStatus, 3000);
+                    } else if (crawlPollTimer) {
+                        clearTimeout(crawlPollTimer);
+                        crawlPollTimer = null;
+                    }
+                })
+                .catch(() => {});
+        }
+
+        document.getElementById('btnStartCrawl').addEventListener('click', function () {
+            const btn = this;
+            btn.disabled = true;
+            document.getElementById('crawlResult').innerHTML = '';
+            fetch('/api/start_crawl', { method: 'POST' })
+                .then(r => r.json().then(body => ({ status: r.status, body })))
+                .then(({ status, body }) => {
+                    if (body.success) {
+                        updateCrawlStatusUI({ running: true });
+                        pollCrawlStatus();
+                    } else {
+                        btn.disabled = false;
+                        document.getElementById('crawlResult').innerHTML =
+                            `<div class="alert alert-danger py-2 mb-0">${body.message || '启动失败'}</div>`;
+                    }
+                })
+                .catch(() => {
+                    btn.disabled = false;
+                    document.getElementById('crawlResult').innerHTML =
+                        '<div class="alert alert-danger py-2 mb-0">请求失败，请确认服务已启动。</div>';
+                });
+        });
+
+        pollCrawlStatus();
     </script>
 </body>
 </html>

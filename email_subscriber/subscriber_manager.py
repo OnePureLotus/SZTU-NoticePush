@@ -5,15 +5,12 @@
 """
 
 import re
-import smtplib
 import logging
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.header import Header
 from datetime import datetime, timedelta
 
 from .subscriberDB import EmailSubscriberManager
-from .config import SMTP_SERVER, SMTP_PASSWORD, MY_EMAIL, SUBSCRIBER_MASK
+from .config import SUBSCRIBER_MASK
+from .smtp_client import send_email, send_smtp_verification_test
 
 
 class SubscriberService:
@@ -26,11 +23,6 @@ class SubscriberService:
 
         # 初始化数据库管理器
         self.db_manager = EmailSubscriberManager()
-
-        self.smtp_server = SMTP_SERVER
-        self.smtp_port = 587  # 默认使用TLS端口
-        self.sender_email = MY_EMAIL
-        self.sender_password = SMTP_PASSWORD
         self.subscriber_pattern = re.compile(SUBSCRIBER_MASK)
 
         self.logger.info("邮件订阅服务初始化完成")
@@ -69,14 +61,20 @@ class SubscriberService:
             if not subscriber:
                 return None
 
+            base = {
+                "smtp_server": subscriber.smtp_server or "",
+                "smtp_email": subscriber.smtp_email or "",
+            }
             if subscriber.all_platforms:
                 return {
+                    **base,
                     "all_platforms": True,
                     "platform_ids": [],
                     "send_frequency": subscriber.send_frequency or 24,
                 }
             else:
                 return {
+                    **base,
                     "all_platforms": False,
                     "platform_ids": [p.id for p in subscriber.platforms],
                     "send_frequency": subscriber.send_frequency or 24,
@@ -85,16 +83,21 @@ class SubscriberService:
             session.close()
 
     def add_subscriber(
-        self, email, platform_ids=None, all_platforms=True, send_frequency=24
+        self,
+        email,
+        platform_ids=None,
+        all_platforms=True,
+        send_frequency=24,
+        smtp_server=None,
+        smtp_email=None,
+        smtp_password=None,
     ):
         """
         添加新的订阅者到数据库或更新现有订阅者的平台设置
 
         Args:
-            email: 订阅者邮箱
-            platform_ids: 选择的平台ID列表
-            all_platforms: 是否订阅所有平台
-            send_frequency: 发送频率（小时）
+            email: 收件邮箱
+            smtp_server, smtp_email, smtp_password: 发件三要素（更新时密码可空以保留原密码）
 
         Returns:
             tuple: (是否成功, 消消息, 是否为新用户)
@@ -111,7 +114,30 @@ class SubscriberService:
         # 验证是否符合掩码规则
         if not self._match_mask(email):
             self.logger.warning(f"邮箱不符合订阅规则: {email}")
-            return False, "仅接受学号邮箱（全学号@stumail.sztu.edu.cn）订阅", False
+            return False, "邮箱地址不符合当前订阅规则，请检查格式或联系管理员", False
+
+        smtp_server = (smtp_server or "").strip()
+        smtp_email = (smtp_email or "").strip()
+        smtp_password = smtp_password if smtp_password is not None else ""
+
+        existing = self.db_manager.get_subscriber_by_email(email)
+        if existing:
+            if not smtp_password:
+                smtp_password = existing.smtp_password or ""
+            if not smtp_server:
+                smtp_server = existing.smtp_server or ""
+            if not smtp_email:
+                smtp_email = existing.smtp_email or ""
+
+        if not smtp_server or not smtp_email or not smtp_password:
+            return False, "请填写完整的 SMTP 服务器、发件邮箱和发件密码/授权码", False
+
+        ok, verify_msg = send_smtp_verification_test(
+            smtp_server, smtp_email, smtp_password, email
+        )
+        if not ok:
+            self.logger.warning("SMTP 验证失败: %s", verify_msg)
+            return False, verify_msg, False
 
         # 验证发送频率
         try:
@@ -133,7 +159,13 @@ class SubscriberService:
 
         try:
             result, is_new_subscriber = self.db_manager.add_subscriber(
-                email, platform_ids, all_platforms, send_frequency
+                email,
+                platform_ids,
+                all_platforms,
+                send_frequency,
+                smtp_server=smtp_server,
+                smtp_email=smtp_email,
+                smtp_password=smtp_password,
             )
 
             if result:
@@ -225,13 +257,18 @@ class SubscriberService:
             subscribers = filtered_subscribers
             self.logger.info(f"筛选后的订阅者数量: {len(subscribers)}")
 
-        # 获取所有订阅者邮箱
-        receiver_emails = [sub.email for sub in subscribers]
-
-        # 发送邮件
-        success_count = self._send_batch_email(
-            subject=subject, content=content, receivers=receiver_emails, is_html=html
-        )
+        success_count = 0
+        for sub in subscribers:
+            n, _ = self._send_batch_email(
+                subject=subject,
+                content=content,
+                receivers=[sub.email],
+                is_html=html,
+                smtp_server=sub.smtp_server,
+                smtp_email=sub.smtp_email,
+                smtp_password=sub.smtp_password,
+            )
+            success_count += n
 
         self.logger.info(f"邮件发送完成，成功: {success_count}/{len(subscribers)}")
         return success_count, len(subscribers)
@@ -295,21 +332,48 @@ class SubscriberService:
             subscribers = filtered_subscribers
             self.logger.info(f"筛选后的订阅者数量: {len(subscribers)}")
 
-        # 获取所有订阅者邮箱
-        receiver_emails = [sub.email for sub in subscribers]
-
-        # 发送邮件
-        success_count = self._send_batch_email(
-            subject=subject, content=content, receivers=receiver_emails, is_html=html
-        )
+        success_count = 0
+        for sub in subscribers:
+            n, _ = self._send_batch_email(
+                subject=subject,
+                content=content,
+                receivers=[sub.email],
+                is_html=html,
+                smtp_server=sub.smtp_server,
+                smtp_email=sub.smtp_email,
+                smtp_password=sub.smtp_password,
+            )
+            success_count += n
 
         self.logger.info(
             f"频率{frequency_hours}小时邮件发送完成，成功: {success_count}/{len(subscribers)}"
         )
         return success_count, len(subscribers)
 
+    def get_due_subscribers_snapshot(self):
+        """当前时刻符合推送频率的订阅者（同一轮多部门推送应复用此列表）。"""
+        return self.db_manager.get_subscribers_due_for_email()
+
+    def finalize_push_batch(self, subscriber_ids):
+        """一轮爬取推送结束后，统一更新订阅者上次发送时间。"""
+        if not subscriber_ids:
+            return
+        from datetime import datetime
+
+        self.db_manager.batch_update_last_email_sent_time(
+            list(subscriber_ids), datetime.now()
+        )
+
     def send_email_to_subscribers_by_individual_frequency(
-        self, subject, content, html=False, source_platform=None
+        self,
+        subject,
+        content,
+        html=False,
+        source_platform=None,
+        inline_images=None,
+        file_attachments=None,
+        due_subscribers_snapshot=None,
+        update_sent_time=True,
     ):
         """
         根据每个订阅者的个人推送频率发送邮件
@@ -321,16 +385,20 @@ class SubscriberService:
             source_platform: 文章来源平台名称
 
         Returns:
-            tuple: (成功发送数量, 总符合条件订阅者数量)
+            tuple: (成功数, 总数, sent_ids, failed_ids, failed_errors)
+            failed_errors: {subscriber_id: message}
         """
         from datetime import datetime
 
-        # 获取当前应该接收邮件的订阅者
-        due_subscribers = self.db_manager.get_subscribers_due_for_email()
+        due_subscribers = (
+            due_subscribers_snapshot
+            if due_subscribers_snapshot is not None
+            else self.db_manager.get_subscribers_due_for_email()
+        )
 
         if not due_subscribers:
             self.logger.info("当前没有需要推送的订阅者")
-            return 0, 0
+            return 0, 0, set(), set(), {}
 
         self.logger.info(f"找到 {len(due_subscribers)} 个需要推送的订阅者")
 
@@ -345,12 +413,16 @@ class SubscriberService:
 
         # 如果指定了来源平台，筛选订阅了该平台的用户
         if source_platform:
-            platform_id = self.db_manager.get_platform_id_by_name(source_platform)
+            platform_id = self.db_manager.resolve_platform_id(source_platform)
             if platform_id is None:
-                self.logger.warning(f"未找到平台: {source_platform}")
-                return 0, 0
+                self.logger.warning(
+                    f"未在订阅平台库中匹配到: {source_platform}，"
+                    f"仍向「订阅全部平台」的用户发送"
+                )
 
-            self.logger.info(f"平台 {source_platform} 的ID: {platform_id}")
+            self.logger.info(
+                f"平台 {source_platform} 的ID: {platform_id if platform_id else '未匹配'}"
+            )
 
             filtered_subscribers = []
             for sub in due_subscribers:
@@ -359,7 +431,7 @@ class SubscriberService:
                     self.logger.debug(
                         f"用户 {sub.email} 订阅所有平台，包含在发送列表中"
                     )
-                else:
+                elif platform_id is not None:
                     subscribed_platform_ids = [p.id for p in sub.platforms]
                     if platform_id in subscribed_platform_ids:
                         filtered_subscribers.append(sub)
@@ -376,10 +448,13 @@ class SubscriberService:
 
         if not due_subscribers:
             self.logger.info("筛选后没有需要推送的订阅者")
-            return 0, 0
+            return 0, 0, set(), set(), {}
 
         # 按用户逐个发送邮件（确保每个用户的发送时间都能正确记录）
         success_count = 0
+        sent_subscriber_ids = set()
+        failed_subscriber_ids = set()
+        failed_errors = {}
         current_time = datetime.now()
 
         for subscriber in due_subscribers:
@@ -388,19 +463,25 @@ class SubscriberService:
                 is_first_time = subscriber.last_email_sent_time is None
 
                 # 为单个用户发送邮件
-                individual_success = self._send_batch_email(
+                individual_success, send_err = self._send_batch_email(
                     subject=subject,
                     content=content,
                     receivers=[subscriber.email],
                     is_html=html,
+                    inline_images=inline_images,
+                    file_attachments=file_attachments,
+                    smtp_server=subscriber.smtp_server,
+                    smtp_email=subscriber.smtp_email,
+                    smtp_password=subscriber.smtp_password,
                 )
 
                 if individual_success > 0:
-                    # 发送成功，更新该用户的最后发送时间
-                    self.db_manager.update_last_email_sent_time(
-                        subscriber.id, current_time
-                    )
                     success_count += 1
+                    sent_subscriber_ids.add(subscriber.id)
+                    if update_sent_time:
+                        self.db_manager.update_last_email_sent_time(
+                            subscriber.id, current_time
+                        )
 
                     if is_first_time:
                         self.logger.info(
@@ -411,15 +492,52 @@ class SubscriberService:
                             f"成功发送邮件给 {subscriber.email}，推送频率: {subscriber.send_frequency}小时"
                         )
                 else:
+                    failed_subscriber_ids.add(subscriber.id)
+                    failed_errors[subscriber.id] = send_err or "SMTP send failed"
                     self.logger.warning(f"发送邮件给 {subscriber.email} 失败")
 
             except Exception as e:
+                failed_subscriber_ids.add(subscriber.id)
+                failed_errors[subscriber.id] = str(e)
                 self.logger.error(f"发送邮件给 {subscriber.email} 时出错: {str(e)}")
 
         self.logger.info(
             f"个性化频率邮件发送完成，成功: {success_count}/{len(due_subscribers)}"
         )
-        return success_count, len(due_subscribers)
+        return (
+            success_count,
+            len(due_subscribers),
+            sent_subscriber_ids,
+            failed_subscriber_ids,
+            failed_errors,
+        )
+
+    def send_platform_digest_to_subscriber(
+        self, subscriber, platform, articles, update_sent_time=False
+    ):
+        """向单个订阅者发送部门 digest（outbox 重试使用；默认不更新 last_email_sent_time）。"""
+        from datetime import datetime
+        from email_content import build_platform_digest
+
+        digest = build_platform_digest(platform, articles)
+        count, err = self._send_batch_email(
+            subject=digest.subject,
+            content=digest.html,
+            receivers=[subscriber.email],
+            is_html=True,
+            inline_images=digest.inline_images,
+            file_attachments=digest.file_attachments,
+            smtp_server=subscriber.smtp_server,
+            smtp_email=subscriber.smtp_email,
+            smtp_password=subscriber.smtp_password,
+        )
+        if count > 0:
+            if update_sent_time:
+                self.db_manager.update_last_email_sent_time(
+                    subscriber.id, datetime.now()
+                )
+            return True, None
+        return False, err or "SMTP send failed"
 
     def get_stats(self):
         """获取统计数据"""
@@ -435,51 +553,55 @@ class SubscriberService:
         """检查邮箱是否符合订阅掩码规则"""
         return bool(self.subscriber_pattern.match(email))
 
-    def _send_batch_email(self, subject, content, receivers, is_html=False):
+    def _send_batch_email(
+        self,
+        subject,
+        content,
+        receivers,
+        is_html=False,
+        inline_images=None,
+        file_attachments=None,
+        smtp_server=None,
+        smtp_email=None,
+        smtp_password=None,
+    ):
         """
-        批量发送邮件
-
-        Args:
-            subject: 邮件主题
-            content: 邮件内容
-            receivers: 接收者邮箱列表
-            is_html: 是否为HTML内容
+        使用指定 SMTP 凭据发送邮件（通常每位订阅者单独调用一次）。
 
         Returns:
-            int: 成功发送的数量
+            tuple: (成功数量 0 或 len(receivers), 失败时的错误信息)
         """
         if not receivers:
-            return 0
+            return 0, None
 
-        try:
-            # 创建邮件
-            message = MIMEMultipart()
-            message["From"] = self.sender_email
-            message["To"] = ";".join(receivers)
-            message["Subject"] = Header(subject, "utf-8")
+        smtp_server = (smtp_server or "").strip()
+        smtp_email = (smtp_email or "").strip()
+        smtp_password = smtp_password or ""
 
-            # 邮件正文
-            content_type = "html" if is_html else "plain"
-            message.attach(MIMEText(content, content_type, "utf-8"))
+        if not smtp_server or not smtp_email or not smtp_password:
+            msg = "未配置完整发件 SMTP，需重新订阅以填写发件邮箱"
+            self.logger.warning(
+                "订阅者 %s %s",
+                receivers[0] if receivers else "?",
+                msg,
+            )
+            return 0, msg
 
-            # 连接SMTP服务器
-            server = smtplib.SMTP(self.smtp_server, self.smtp_port)
-            server.starttls()
-            server.login(self.sender_email, self.sender_password)
+        ok, err = send_email(
+            smtp_server,
+            smtp_email,
+            smtp_password,
+            receivers,
+            subject,
+            content,
+            is_html=is_html,
+            inline_images=inline_images,
+            file_attachments=file_attachments,
+        )
+        if ok:
+            self.db_manager.increment_emails_sent(len(receivers))
+            self.logger.info("邮件已发送给 %s 位收件人", len(receivers))
+            return len(receivers), None
 
-            # 发送邮件
-            server.sendmail(self.sender_email, receivers, message.as_string())
-            self.logger.info(f"邮件已发送给{len(receivers)}位订阅者")
-
-            # 更新邮件发送统计
-            if receivers and len(receivers) > 0:
-                self.db_manager.increment_emails_sent(len(receivers))
-                self.logger.info(f"邮件统计已更新，增加 {len(receivers)} 封")
-
-            # 关闭连接
-            server.quit()
-            return len(receivers)
-
-        except Exception as e:
-            self.logger.error(f"发送邮件失败: {str(e)}")
-            return 0
+        self.logger.error("发送邮件失败: %s", err)
+        return 0, err

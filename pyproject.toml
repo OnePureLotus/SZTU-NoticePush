@@ -1,9 +1,9 @@
 [project]
-name = "goldenmouse"
-version = "1.0.0"
-description = "深圳技术大学公文通爬虫和订阅系统"
+name = "sztu-noticepush"
+version = "2.0.0"
+description = "SZTU campus notice crawler, web UI, and email push (producer-consumer)"
 authors = [
-    {name = "GoldenMouse Team"}
+    {name = "SZTU-NoticePush Contributors"}
 ]
 readme = "README.md"
 requires-python = ">=3.8"
@@ -40,9 +40,9 @@ dev = [
 server = "server:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/goldenmouse"
-Repository = "https://github.com/yourusername/goldenmouse"
-Issues = "https://github.com/yourusername/goldenmouse/issues"
+Homepage = "https://github.com/OnePureLotus/SZTU-NoticePush"
+Repository = "https://github.com/OnePureLotus/SZTU-NoticePush"
+Issues = "https://github.com/OnePureLotus/SZTU-NoticePush/issues"
 
 [build-system]
 requires = ["hatchling"]

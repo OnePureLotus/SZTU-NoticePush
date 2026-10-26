@@ -1,4 +1,6 @@
 from flask import Flask, jsonify, request
+import argparse
+import os
 import pathlib
 import threading
 import time
@@ -6,7 +8,12 @@ import schedule
 from datetime import datetime, date, timedelta
 
 # 使用新的统一配置
-from config import ARTICLES_DATABASE_URI as DATABASE_URI
+from config import (
+    ARTICLES_DATABASE_URI as DATABASE_URI,
+    SCHEDULED_CRAWL_HOURS,
+    ABNORMAL_LOG_FILE,
+    PUSH_POLL_SECONDS,
+)
 
 # 直接引用official_document_crawler中的模块
 from official_document_crawler.crawler.database import Base, Article, DatabaseManager
@@ -14,6 +21,13 @@ from official_document_crawler.main_crawler import main_crawler
 
 # 导入邮件订阅相关模块
 from email_subscriber.subscriber_manager import SubscriberService
+from email_subscriber.push_retry_worker import run_push_retry_loop
+from email_subscriber.push_pipeline import enqueue_from_urls
+from email_subscriber.push_worker import (
+    run_push_worker_loop,
+    get_last_push_cycle_stats,
+)
+from ops_abnormal_log import log_abnormal
 
 ROOT_PATH = pathlib.Path(__file__).parent.resolve()
 STATIC_FOLDER = str(ROOT_PATH / "static")
@@ -27,212 +41,113 @@ db_manager = DatabaseManager()
 # 初始化邮件订阅服务
 subscriber_service = SubscriberService()
 
-# 简化的全局变量，只保存已发送的URL集合
-last_sent_urls = set()
+push_retry_thread_started = False
+push_worker_thread_started = False
+
+# 自动爬虫状态（日志仍输出到运行 server.py 的同一终端）
+crawl_running = threading.Event()
+crawler_automation_enabled = False
+crawler_automation_lock = threading.Lock()
+crawl_status = {
+    "automation_started_at": None,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_new_count": 0,
+    "last_error": None,
+}
 
 
-# 重构邮件发送逻辑，使用个性化推送频率
-def send_new_articles_email_by_individual_frequency(new_urls):
-    global last_sent_urls
-
+def enqueue_new_articles_from_crawl(new_urls):
+    """生产者：将本轮新文章写入各订阅者待推队列（发信由推送消费者线程处理）。"""
     try:
-        # 过滤掉已经发送过的URL
-        truly_new_urls = [url for url in new_urls if url not in last_sent_urls]
-
-        if not truly_new_urls:
-            print(f"[{datetime.now()}] 📭 没有新文章需要发送")
-            return
-
+        urls = new_urls or []
+        if not urls:
+            return 0
+        enqueued = enqueue_from_urls(subscriber_service, db_manager, urls)
         print(
-            f"[{datetime.now()}] 📧 发现 {len(truly_new_urls)} 条新文章，开始个性化推送"
+            f"[{datetime.now()}] 📥 入队完成：新文章 {len(urls)} 条，"
+            f"新增队列项 {enqueued}，待推总计 "
+            f"{subscriber_service.db_manager.count_pending_articles()}"
         )
-
-        # 查询新文章的详细信息
-        session = db_manager.get_session()
-        new_articles = (
-            session.query(Article).filter(Article.url.in_(truly_new_urls)).all()
-        )
-
-        if not new_articles:
-            print("❌ 没有找到对应的文章详情")
-            session.close()
-            return
-
-        # 按平台分组文章
-        articles_by_platform = {}
-        for article in new_articles:
-            platform = article.source
-            if platform not in articles_by_platform:
-                articles_by_platform[platform] = []
-            articles_by_platform[platform].append(article)
-
-        # 为每个平台的文章发送个性化推送
-        total_sent = 0
-        for platform, platform_articles in articles_by_platform.items():
-            print(
-                f"[{datetime.now()}] 📤 处理平台: {platform}, 文章数: {len(platform_articles)}"
-            )
-
-            # 构建邮件主题
-            if len(platform_articles) == 1:
-                email_subject = f"【公文通】{platform_articles[0].title}"
-            else:
-                email_subject = (
-                    f"【公文通】{platform} - {len(platform_articles)}条新通知"
-                )
-
-            # 构建HTML邮件内容
-            html_content = f"""
-            <html>
-            <head>
-                <style>
-                    body {{
-                        font-family: 'PingFang SC', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-                        background-color: #f5f5f5;
-                        color: #333;
-                        padding: 20px;
-                        max-width: 600px;
-                        margin: 0 auto;
-                    }}
-                    .header {{
-                        text-align: center;
-                        margin-bottom: 20px;
-                        padding-bottom: 15px;
-                        border-bottom: 2px solid #007bff;
-                    }}
-                    .summary {{
-                        background-color: #e7f3ff;
-                        padding: 15px;
-                        border-radius: 8px;
-                        margin-bottom: 20px;
-                        text-align: center;
-                    }}
-                    .article-card {{
-                        background-color: white;
-                        border-radius: 8px;
-                        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                        padding: 15px;
-                        margin-bottom: 15px;
-                        border-left: 4px solid #007bff;
-                    }}
-                    .title {{
-                        font-size: 18px;
-                        font-weight: bold;
-                        margin-bottom: 8px;
-                        color: #003366;
-                    }}
-                    .title a {{
-                        color: #003366;
-                        text-decoration: none;
-                    }}
-                    .title a:hover {{
-                        text-decoration: underline;
-                    }}
-                    .meta {{
-                        display: flex;
-                        justify-content: space-between;
-                        color: #666;
-                        font-size: 14px;
-                        margin-top: 5px;
-                    }}
-                    .platform {{
-                        font-weight: bold;
-                        color: #0055a4;
-                    }}
-                    .date {{
-                        color: #777;
-                    }}
-                    .footer {{
-                        text-align: center;
-                        margin-top: 25px;
-                        font-size: 12px;
-                        color: #888;
-                        padding-top: 15px;
-                        border-top: 1px solid #eee;
-                    }}
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <h2>📝 深圳技术大学公文通更新</h2>
-                </div>
-                <div class="summary">
-                    <h3>📊 本次推送汇总</h3>
-                    <p><strong>{platform}</strong> 平台有 <strong>{len(platform_articles)}</strong> 条新通知</p>
-                    <p>推送模式：个性化频率推送</p>
-                </div>
-            """
-
-            for i, article in enumerate(platform_articles, 1):
-                date_display = (
-                    f"{article.date} {article.detail_time}"
-                    if article.detail_time
-                    else article.date
-                )
-
-                html_content += f"""
-                <div class="article-card">
-                    <div class="title">
-                        <span style="color: #999; font-size: 14px;">#{i}</span>
-                        <a href="{article.url}" target="_blank">{article.title}</a>
-                    </div>
-                    <div class="meta">
-                        <span class="platform">📣 {article.source}</span>
-                        <span class="date">🕒 {date_display}</span>
-                    </div>
-                </div>
-                """
-
-            html_content += f"""
-                <div class="footer">
-                    <p>您的邮件根据个人设置的推送频率发送</p>
-                    <p>感谢您的订阅！如需调整订阅设置，请访问 <a href="http://localhost:5000/subscribe">订阅页面</a>。</p>
-                    <p>© 2023 深圳技术大学GoldenMouse - 让校园信息触手可及 🐭</p>
-                </div>
-            </body>
-            </html>
-            """
-
-            # 使用新的个性化推送方法
-            success, total = (
-                subscriber_service.send_email_to_subscribers_by_individual_frequency(
-                    subject=email_subject,
-                    content=html_content,
-                    html=True,
-                    source_platform=platform,
-                )
-            )
-
-            total_sent += total
-            if total > 0:
-                print(
-                    f"[{datetime.now()}] ✅ 发送 {platform} 平台邮件完成（个性化推送），成功: {success}/{total}"
-                )
-
-        # 更新已发送URL集合
-        last_sent_urls.update(truly_new_urls)
-        # 限制集合大小，避免内存无限增长
-        if len(last_sent_urls) > 200:
-            last_sent_urls = set(list(last_sent_urls)[-200:])
-
-        session.close()
-
+        return enqueued
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ 发送新文章邮件失败: {str(e)}")
+        log_abnormal("push", "爬取入队异常", e)
+        print(f"[{datetime.now()}] ❌ 入队失败: {str(e)}")
+        return 0
 
 
-# 定时任务线程函数
-def run_scheduler():
-    # 创建定时任务，每小时执行一次
-    schedule.every(0.5).hours.do(crawl_task)
+def send_new_articles_email_by_individual_frequency(new_urls):
+    """兼容旧调用名：仅入队，不触发同步发信。"""
+    enqueue_new_articles_from_crawl(new_urls or [])
 
-    # 服务启动时先执行一次爬取
-    print("🚀 服务启动，执行首次爬取...")
+
+def run_automated_crawler_loop():
+    """
+    在独立线程中运行 schedule 循环；crawl_task 内的 print/logging 仍写入启动服务的终端。
+    首次点击启动后立即爬取一轮，之后按 SCHEDULED_CRAWL_HOURS 重复。
+    """
+    interval_min = int(SCHEDULED_CRAWL_HOURS * 60)
+    print(
+        f"[{datetime.now()}] 自动爬虫已启动：立即执行首轮爬取，"
+        f"之后每 {SCHEDULED_CRAWL_HOURS} 小时（约 {interval_min} 分钟）执行一次"
+    )
     crawl_task()
+
+    schedule.clear()
+    schedule.every(SCHEDULED_CRAWL_HOURS).hours.do(crawl_task)
 
     while True:
         schedule.run_pending()
         time.sleep(1)
+
+
+def start_automated_crawler():
+    """启动后台自动爬虫线程；若已在运行则返回 (False, message)。"""
+    global crawler_automation_enabled
+    with crawler_automation_lock:
+        if crawler_automation_enabled:
+            return (
+                False,
+                f"自动爬虫已在运行（每 {SCHEDULED_CRAWL_HOURS} 小时一轮）",
+            )
+        crawler_automation_enabled = True
+        crawl_status["automation_started_at"] = datetime.now().isoformat()
+
+    threading.Thread(target=run_automated_crawler_loop, daemon=True).start()
+    return (
+        True,
+        (
+            f"已启动自动爬虫：立即开始首轮抓取，之后每约 "
+            f"{int(SCHEDULED_CRAWL_HOURS * 60)} 分钟重复；日志见运行服务的终端"
+        ),
+    )
+
+
+@app.route("/api/start_crawl", methods=["POST"])
+def api_start_crawl():
+    ok, message = start_automated_crawler()
+    if not ok:
+        return jsonify({"success": False, "message": message}), 409
+    return jsonify({"success": True, "message": message})
+
+
+@app.route("/api/crawl_status", methods=["GET"])
+def api_crawl_status():
+    return jsonify(
+        {
+            "success": True,
+            "automation_enabled": crawler_automation_enabled,
+            "automation_started_at": crawl_status["automation_started_at"],
+            "interval_hours": SCHEDULED_CRAWL_HOURS,
+            "running": crawl_running.is_set(),
+            "last_started_at": crawl_status["last_started_at"],
+            "last_finished_at": crawl_status["last_finished_at"],
+            "last_new_count": crawl_status["last_new_count"],
+            "last_error": crawl_status["last_error"],
+            "push_poll_seconds": PUSH_POLL_SECONDS,
+            "push_worker": get_last_push_cycle_stats(),
+        }
+    )
 
 
 # 新增API - 获取所有平台
@@ -276,13 +191,43 @@ def subscribe():
         all_platforms = data.get("all_platforms", True)
         platform_ids = data.get("platform_ids", [])
         send_frequency = data.get("send_frequency", 24)
+        smtp_server = (data.get("smtp_server") or "").strip()
+        smtp_email = (data.get("smtp_email") or "").strip()
+        smtp_password = data.get("smtp_password")
+        if smtp_password is None:
+            smtp_password = ""
 
         print(
-            f"📝 收到订阅请求: email={email}, all_platforms={all_platforms}, platform_ids={platform_ids}, send_frequency={send_frequency}"
+            f"📝 收到订阅请求: email={email}, all_platforms={all_platforms}, "
+            f"platform_ids={platform_ids}, send_frequency={send_frequency}, "
+            f"smtp_server={smtp_server}, smtp_email={smtp_email}"
         )
 
         if not email:
             return jsonify({"success": False, "message": "邮箱不能为空"}), 400
+
+        if not smtp_server or not smtp_email:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": "请填写 SMTP 服务器与发件邮箱",
+                    }
+                ),
+                400,
+            )
+
+        existing_sub = subscriber_service.db_manager.get_subscriber_by_email(email)
+        if existing_sub is None and not smtp_password:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": "新订阅请填写发件密码/授权码",
+                    }
+                ),
+                400,
+            )
 
         # 验证发送频率
         try:
@@ -312,8 +257,18 @@ def subscribe():
             return jsonify({"success": False, "message": "请至少选择一个平台"}), 400
 
         success, message, is_new_subscriber = subscriber_service.add_subscriber(
-            email, platform_ids, all_platforms, send_frequency
+            email,
+            platform_ids,
+            all_platforms,
+            send_frequency,
+            smtp_server=smtp_server,
+            smtp_email=smtp_email,
+            smtp_password=smtp_password,
         )
+
+        if not success:
+            status = 400 if "SMTP" in message or "发件" in message or "授权码" in message else 200
+            return jsonify({"success": False, "message": message}), status
 
         if success:
             # 获取平台名称列表（用于发送订阅确认邮件）
@@ -338,8 +293,15 @@ def subscribe():
 
             # 只有新订阅者才发送确认邮件
             if is_new_subscriber:
+                sub = subscriber_service.db_manager.get_subscriber_by_email(email)
                 send_subscription_confirmation(
-                    email, all_platforms, platform_names, send_frequency
+                    email,
+                    all_platforms,
+                    platform_names,
+                    send_frequency,
+                    smtp_server=sub.smtp_server if sub else smtp_server,
+                    smtp_email=sub.smtp_email if sub else smtp_email,
+                    smtp_password=sub.smtp_password if sub else smtp_password,
                 )
                 print(f"✅ 新用户 {email} 订阅成功")
             else:
@@ -514,8 +476,14 @@ def archive():
 
 
 @app.route("/subscribe")
+@app.route("/subscribe/")
 def subscribe_page():
-    return app.send_static_file("subscribe.html")  # 新增的订阅页面
+    return app.send_static_file("subscribe.html")
+
+
+@app.route("/subscribe.html")
+def subscribe_page_legacy():
+    return app.send_static_file("subscribe.html")
 
 
 # 新增API - 获取统计数据
@@ -529,9 +497,34 @@ def get_stats():
         return jsonify({"success": False, "message": f"服务器错误: {str(e)}"}), 500
 
 
+@app.route("/api/push_outbox_stats", methods=["GET"])
+def push_outbox_stats():
+    try:
+        db = subscriber_service.db_manager
+        return jsonify(
+            {
+                "success": True,
+                "outbox_pending": db.count_pending_outbox(),
+                "article_queue_pending": db.count_pending_articles(),
+                "users_in_delivery_window": db.count_users_in_delivery_window(),
+                "push_poll_seconds": PUSH_POLL_SECONDS,
+                "push_worker": get_last_push_cycle_stats(),
+                "abnormal_log": str(ABNORMAL_LOG_FILE),
+            }
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # 发送订阅成功确认邮件
 def send_subscription_confirmation(
-    email, all_platforms, platform_names=None, send_frequency=1
+    email,
+    all_platforms,
+    platform_names=None,
+    send_frequency=1,
+    smtp_server=None,
+    smtp_email=None,
+    smtp_password=None,
 ):
     try:
         # 确定订阅的平台类型描述
@@ -607,7 +600,7 @@ def send_subscription_confirmation(
                     <p>如需调整订阅设置或取消订阅，请随时访问我们的 <a href="http://localhost:5000/subscribe">订阅管理页面</a>。</p>
                 </div>
                 <div class="footer">
-                    <p>© 2023 深圳技术大学GoldenMouse - 让校园信息触手可及 🐭</p>
+                    <p>© SZTU-NoticePush</p>
                 </div>
             </div>
         </body>
@@ -616,11 +609,14 @@ def send_subscription_confirmation(
 
         # 发送确认邮件
         subscriber_service._send_batch_email(
-            subject="【公文通】✅ 订阅成功确认",
+            subject="【SZTU-NoticePush】✅ 订阅成功确认",
             content=html_content,
             receivers=[email],
             is_html=True,
-        )
+            smtp_server=smtp_server,
+            smtp_email=smtp_email,
+            smtp_password=smtp_password,
+        )[0]
         print(f"[{datetime.now()}] ✅ 订阅确认邮件已发送至: {email}")
         return True
 
@@ -631,19 +627,32 @@ def send_subscription_confirmation(
 
 # 更新爬虫任务函数，使用新的推送方法
 def crawl_task():
-    print(f"[{datetime.now()}] ⏰ 开始执行定时爬取任务...")
+    global crawl_status
+    if crawl_running.is_set():
+        msg = "上一轮爬取尚未结束，跳过本次定时任务"
+        log_abnormal("crawl", msg)
+        print(f"[{datetime.now()}] {msg}")
+        return []
+
+    crawl_running.set()
+    crawl_status["last_started_at"] = datetime.now().isoformat()
+    crawl_status["last_error"] = None
     try:
+        print(f"[{datetime.now()}] 开始执行爬取任务...")
         new_urls = main_crawler(start_page=0, end_page=2, mode="all")
-        print(
-            f"[{datetime.now()}] ✅ 爬取完成，发现 {len(new_urls) if new_urls else 0} 条新内容"
-        )
-        # 如果有新内容，使用个性化推送
-        if new_urls and len(new_urls) > 0:
-            send_new_articles_email_by_individual_frequency(new_urls)
+        count = len(new_urls) if new_urls else 0
+        crawl_status["last_new_count"] = count
+        print(f"[{datetime.now()}] 爬取完成，发现 {count} 条新内容")
+        enqueue_new_articles_from_crawl(new_urls or [])
         return new_urls
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ 爬取任务执行失败: {str(e)}")
+        crawl_status["last_error"] = str(e)
+        log_abnormal("crawl", "爬取任务执行失败", e)
+        print(f"[{datetime.now()}] 爬取任务执行失败: {str(e)}")
         return []
+    finally:
+        crawl_status["last_finished_at"] = datetime.now().isoformat()
+        crawl_running.clear()
 
 
 # 保留旧的函数名以保持兼容性
@@ -657,18 +666,77 @@ def send_new_articles_email(new_urls):
     send_new_articles_email_by_individual_frequency(new_urls)
 
 
-def main():
+def start_push_retry_worker():
+    """启动 outbox 后台重试线程（Flask debug 重载时仅在子进程启动一次）。"""
+    global push_retry_thread_started
+    werkzeug_main = os.environ.get("WERKZEUG_RUN_MAIN")
+    if werkzeug_main == "false":
+        return
+    if push_retry_thread_started:
+        return
+    push_retry_thread_started = True
+    threading.Thread(
+        target=run_push_retry_loop,
+        args=(subscriber_service,),
+        daemon=True,
+    ).start()
+
+
+def start_push_worker():
+    """启动推送消费者线程（与爬虫并行，轮询待推队列与投递窗口）。"""
+    global push_worker_thread_started
+    werkzeug_main = os.environ.get("WERKZEUG_RUN_MAIN")
+    if werkzeug_main == "false":
+        return
+    if push_worker_thread_started:
+        return
+    push_worker_thread_started = True
+    threading.Thread(
+        target=run_push_worker_loop,
+        args=(subscriber_service, db_manager),
+        daemon=True,
+    ).start()
+
+
+def parse_server_args(argv=None):
+    parser = argparse.ArgumentParser(description="SZTU-NoticePush Web 服务")
+    parser.add_argument(
+        "--start-crawler",
+        action="store_true",
+        help="服务启动后自动开始爬虫（等同订阅页「启动自动爬虫」）",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
+    parser.add_argument("--port", type=int, default=5000, help="监听端口")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
     """主函数，用于 uv run 命令调用"""
-    # 启动时显示兼容性信息
+    args = parse_server_args(argv)
+
     print("🔄 检查数据库兼容性...")
 
-    # 启动定时任务线程
-    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-    scheduler_thread.start()
-    print("🕒 定时爬取任务已启动，每半小时执行一次")
-    print("📧 邮件推送已升级为个性化频率推送，兼容版本升级前的用户")
+    if args.start_crawler:
+        ok, message = start_automated_crawler()
+        if ok:
+            print(f"[CLI] {message}")
+        else:
+            print(f"[CLI] 未启动爬虫: {message}")
+    else:
+        print(
+            "爬虫未随服务启动：请使用 python server.py --start-crawler，"
+            "或在「邮件订阅」页点击「启动自动爬虫」"
+            f"（之后每约 {int(SCHEDULED_CRAWL_HOURS * 60)} 分钟一轮，日志在本终端）"
+        )
 
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    print(
+        f"邮件推送：生产者入队 + 消费者每 {PUSH_POLL_SECONDS}s 轮询；"
+        f"SMTP 失败写入 outbox 自动补发"
+    )
+    start_push_worker()
+    start_push_retry_worker()
+
+    app.run(debug=True, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
